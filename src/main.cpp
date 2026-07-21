@@ -27,12 +27,17 @@ enum EyeType {
   EYE_FURIA,
   EYE_BLINK,
   EYE_RASCAL,
+  EYE_SURPRESO,
+  EYE_APAIXONADO,
+  EYE_PISCADINHA,
+  EYE_CONFUSO,
   EYE_COUNT
 };
 
 const char* eyeNames[] = {
   "neutro", "feliz", "triste", "malvado",
-  "dormido", "cansado", "furia", "blink", "rascal"
+  "dormido", "cansado", "furia", "blink", "rascal",
+  "surpreso", "apaixonado", "piscadinha", "confuso"
 };
 
 // Modos especiais do botão físico
@@ -41,8 +46,9 @@ enum SpecialMode {
   MODE_CLOCK        = 1,   // 1º click botão → hora
   MODE_FOCUS_SETUP  = 2,   // 2º click botão → configura timer foco
   MODE_FOCUS_RUN    = 3,   // botão longo no modo setup → inicia foco
-  MODE_WEB_INFO     = 4,   // 3º click botão → como acessar o modo web
-  MODE_WEATHER      = 9,   // touch no modo clock → clima
+  MODE_STATUS       = 4,   // 3º click botão → status do dispositivo (rede/IP + uptime + heap)
+  MODE_WEATHER      = 9,   // touch no modo clock → clima atual
+  MODE_FORECAST     = 10,  // touch no modo clima → previsão dos próximos 3 dias
 };
 
 // ══════════════════════════════════════════════════════════════════════
@@ -63,6 +69,16 @@ Servo  headServo;
 float  servoCurrentAngle = SERVO_CENTER;
 int    servoCenterCfg    = SERVO_CENTER;  // ajustável via /servo (painel web)
 int    servoRangeCfg     = SERVO_RANGE;   // ajustável via /servo (painel web)
+float  servoSmoothCfg    = SERVO_SMOOTH;  // ajustável via /servo (painel web)
+
+// ── Tamanho dos olhos — ajustável via /eyesize (painel web) ────────────
+int    eyeSizeXCfg      = (int)EYE_SIZE_X;
+int    eyeSizeYCfg      = (int)EYE_SIZE_Y;
+int    eyeThicknessCfg  = EYE_THICKNESS;
+
+// ── Horário do modo sono — ajustável via /sleep (painel web) ───────────
+int    sleepStartCfg    = SLEEP_HOUR_START;
+int    sleepEndCfg      = SLEEP_HOUR_END;
 
 void servoWrite(int angle) {
   angle = constrain(angle, 0, 180);
@@ -89,13 +105,15 @@ unsigned long nextBlinkIn   = 0;
 bool blinking = false;
 
 const EyeType RANDOM_POOL[] = {
-  EYE_FELIZ, EYE_FURIA, EYE_MALVADO, EYE_BLINK, EYE_RASCAL
+  EYE_FELIZ, EYE_FURIA, EYE_MALVADO, EYE_BLINK, EYE_RASCAL,
+  EYE_SURPRESO, EYE_APAIXONADO, EYE_PISCADINHA, EYE_CONFUSO
 };
 const byte RANDOM_POOL_SIZE = sizeof(RANDOM_POOL) / sizeof(RANDOM_POOL[0]);
 
 SpecialMode   specialMode     = MODE_NONE;
 unsigned long specialModeEnd  = 0;
 bool          sleepMode       = false;  // modo sono ativo
+bool          dayMode         = true;   // modo dia ativo (contrasta com sleepMode)
 
 // ── Modo foco ─────────────────────────────────────────────────────────
 int           focusMinutes    = 5;          // tempo selecionado (minutos)
@@ -133,11 +151,12 @@ void clearCredentials() {
   savedPass = "";
 }
 
-// ── Ajuste do servo (centro/amplitude) — persistido em NVS ──────────────
+// ── Ajuste do servo (centro/amplitude/smooth) — persistido em NVS ──────
 void loadServoConfig() {
   prefs.begin("servo", true);
   servoCenterCfg = prefs.getInt("center", SERVO_CENTER);
   servoRangeCfg  = prefs.getInt("range",  SERVO_RANGE);
+  servoSmoothCfg = prefs.getFloat("smooth", SERVO_SMOOTH);
   prefs.end();
 }
 
@@ -145,6 +164,39 @@ void saveServoConfig() {
   prefs.begin("servo", false);
   prefs.putInt("center", servoCenterCfg);
   prefs.putInt("range",  servoRangeCfg);
+  prefs.putFloat("smooth", servoSmoothCfg);
+  prefs.end();
+}
+
+// ── Tamanho dos olhos — persistido em NVS ──────────────────────────────
+void loadEyeConfig() {
+  prefs.begin("eyecfg", true);
+  eyeSizeXCfg     = prefs.getInt("sizeX", (int)EYE_SIZE_X);
+  eyeSizeYCfg     = prefs.getInt("sizeY", (int)EYE_SIZE_Y);
+  eyeThicknessCfg = prefs.getInt("thick", EYE_THICKNESS);
+  prefs.end();
+}
+
+void saveEyeConfig() {
+  prefs.begin("eyecfg", false);
+  prefs.putInt("sizeX", eyeSizeXCfg);
+  prefs.putInt("sizeY", eyeSizeYCfg);
+  prefs.putInt("thick", eyeThicknessCfg);
+  prefs.end();
+}
+
+// ── Horário do modo sono — persistido em NVS ───────────────────────────
+void loadSleepConfig() {
+  prefs.begin("sleepcfg", true);
+  sleepStartCfg = prefs.getInt("start", SLEEP_HOUR_START);
+  sleepEndCfg   = prefs.getInt("end",   SLEEP_HOUR_END);
+  prefs.end();
+}
+
+void saveSleepConfig() {
+  prefs.begin("sleepcfg", false);
+  prefs.putInt("start", sleepStartCfg);
+  prefs.putInt("end",   sleepEndCfg);
   prefs.end();
 }
 
@@ -160,9 +212,17 @@ unsigned long lastNtpSync  = 0;
 
 float  cachedTemp    = 0;
 int    cachedWCode   = 0;   // WMO weather code
+float  todayMax      = 0;   // máxima do dia atual
+float  todayMin      = 0;   // mínima do dia atual
 bool   weatherReady  = false;
 unsigned long lastWeatherFetch = 0;
 #define WEATHER_RESYNC_INTERVAL 1800000UL  // 30min
+
+// ── Previsão dos próximos 3 dias (buscada junto com o clima atual) ─────
+float  forecastMax[3]   = {0, 0, 0};
+float  forecastMin[3]   = {0, 0, 0};
+int    forecastWCode[3] = {0, 0, 0};
+bool   forecastReady    = false;
 
 // Barueri, SP
 #define LOC_LAT   "-23.5114"
@@ -176,6 +236,7 @@ unsigned long lastWeatherFetch = 0;
 unsigned long neutralDuration()    { return random(NEUTRAL_DURATION_MIN, NEUTRAL_DURATION_MAX); }
 unsigned long expressionDuration() { return random(EXPR_DURATION_MIN,    EXPR_DURATION_MAX);    }
 unsigned long nextBlinkDelay()     { return random(BLINK_INTERVAL_MIN,   BLINK_INTERVAL_MAX);   }
+unsigned long dayExpressionDuration() { return random(DAY_EXPR_DURATION_MIN, DAY_EXPR_DURATION_MAX); }
 
 // ══════════════════════════════════════════════════════════════════════
 //  Buzzer
@@ -315,24 +376,24 @@ void drawWeather() {
   u8g2.setFont(u8g2_font_6x12_tf);
   const char* city = LOC_CITY;
   int16_t wc = u8g2.getStrWidth(city);
-  u8g2.drawStr((OLED_WIDTH - wc) / 2, 12, city);
+  u8g2.drawStr((OLED_WIDTH - wc) / 2, 11, city);
 
   // ── Linha 2: temperatura grande (esquerda) ────────────────────────
   char tempBuf[8];
   snprintf(tempBuf, sizeof(tempBuf), "%.0f", cachedTemp);
   u8g2.setFont(u8g2_font_fub30_tf);
   int16_t wt = u8g2.getStrWidth(tempBuf);
-  u8g2.drawStr(4, 52, tempBuf);
+  u8g2.drawStr(4, 46, tempBuf);
 
   // Simbolo de grau + C em fonte menor ao lado
   u8g2.setFont(u8g2_font_6x12_tf);
-  u8g2.drawStr(wt + 6, 34, "o");   // grau
-  u8g2.drawStr(wt + 6, 48, "C");
+  u8g2.drawStr(wt + 6, 26, "o");   // grau
+  u8g2.drawStr(wt + 6, 40, "C");
 
   // ── Icone de clima (Open Iconic Weather 2x = 16x16) ──────────────
   // Posiciona no lado direito
   int iconX = 88;
-  int iconY = 36;   // baseline do glifo
+  int iconY = 28;   // baseline do glifo
   u8g2.setFont(u8g2_font_open_iconic_weather_2x_t);
   u8g2.drawGlyph(iconX, iconY, wmoGlyph(cachedWCode));
 
@@ -340,37 +401,86 @@ void drawWeather() {
   u8g2.setFont(u8g2_font_5x7_tr);
   const char* desc = wmoDesc(cachedWCode);
   int16_t wd = u8g2.getStrWidth(desc);
-  u8g2.drawStr(iconX + (16 - wd) / 2, 52, desc);
+  u8g2.drawStr(iconX + (16 - wd) / 2, 44, desc);
+
+  // ── Linha inferior: mínima/máxima do dia atual ────────────────────
+  u8g2.drawHLine(0, 50, OLED_WIDTH);
+  char mmBuf[20];
+  snprintf(mmBuf, sizeof(mmBuf), "Min %.0fo  Max %.0fo", todayMin, todayMax);
+  int16_t wmm = u8g2.getStrWidth(mmBuf);
+  u8g2.drawStr((OLED_WIDTH - wmm) / 2, 61, mmBuf);
 
   u8g2.sendBuffer();
 }
 
-// ── Tela: como acessar o modo web (3º click do botão) ─────────────────
-void drawWebInfo() {
+// ── Tela: previsão dos próximos 3 dias (touch no modo clima) ──────────
+void drawForecast() {
+  u8g2.clearBuffer();
+
+  u8g2.setFont(u8g2_font_5x7_tr);
+  const char* title = "Previsao (max/min)";
+  int16_t wTitle = u8g2.getStrWidth(title);
+  u8g2.drawStr((OLED_WIDTH - wTitle) / 2, 8, title);
+  u8g2.drawHLine(0, 10, OLED_WIDTH);
+
+  int colW = OLED_WIDTH / 3;
+  for (int i = 0; i < 3; i++) {
+    int colX = i * colW;
+    int cx    = colX + colW / 2;
+
+    // Dia da semana (amanhã, depois de amanhã, em 3 dias)
+    int wday = (cachedWDay + i + 1) % 7;
+    u8g2.setFont(u8g2_font_5x7_tr);
+    int16_t ww = u8g2.getStrWidth(wdayNames[wday]);
+    u8g2.drawStr(cx - ww / 2, 20, wdayNames[wday]);
+
+    // Ícone de tempo (mesmo conjunto Open Iconic Weather 2x do clima atual)
+    u8g2.setFont(u8g2_font_open_iconic_weather_2x_t);
+    u8g2.drawGlyph(cx - 8, 38, wmoGlyph(forecastWCode[i]));
+
+    // Temperatura máxima/mínima
+    char buf[12];
+    u8g2.setFont(u8g2_font_5x7_tr);
+    snprintf(buf, sizeof(buf), "%.0f/%.0f", forecastMax[i], forecastMin[i]);
+    int16_t wb = u8g2.getStrWidth(buf);
+    u8g2.drawStr(cx - wb / 2, 50, buf);
+
+    if (i > 0) u8g2.drawVLine(colX, 12, 40);
+  }
+
+  u8g2.sendBuffer();
+}
+
+// ── Tela: status do dispositivo (3º click do botão) ───────────────────
+// Reúne rede/IP (como acessar o painel web) + uptime + memória livre.
+void drawStatus() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_6x10_tr);
 
+  const char* title = "Status";
+  int16_t wTitle = u8g2.getStrWidth(title);
+  u8g2.drawStr((OLED_WIDTH - wTitle) / 2, 10, title);
+  u8g2.drawHLine(0, 13, OLED_WIDTH);
+
+  char buf[28];
+  int y = 25;
+
   if (webWifiConnected) {
-    const char* l1 = "Painel Web em:";
-    int16_t w1 = u8g2.getStrWidth(l1);
-    u8g2.drawStr((OLED_WIDTH - w1) / 2, 26, l1);
-
-    String ip = WiFi.localIP().toString();
-    int16_t w2 = u8g2.getStrWidth(ip.c_str());
-    u8g2.drawStr((OLED_WIDTH - w2) / 2, 42, ip.c_str());
+    snprintf(buf, sizeof(buf), "Painel: %s", WiFi.localIP().toString().c_str());
+    u8g2.drawStr(2, y, buf); y += 11;
   } else {
-    const char* l1 = "Conecte ao Wi-Fi:";
-    int16_t w1 = u8g2.getStrWidth(l1);
-    u8g2.drawStr((OLED_WIDTH - w1) / 2, 16, l1);
-
-    int16_t w2 = u8g2.getStrWidth(WIFI_AP_NAME);
-    u8g2.drawStr((OLED_WIDTH - w2) / 2, 30, WIFI_AP_NAME);
-
-    char l3[24];
-    snprintf(l3, sizeof(l3), "Acesse: %s", AP_IP.toString().c_str());
-    int16_t w3 = u8g2.getStrWidth(l3);
-    u8g2.drawStr((OLED_WIDTH - w3) / 2, 46, l3);
+    snprintf(buf, sizeof(buf), "Rede: %s", WIFI_AP_NAME);
+    u8g2.drawStr(2, y, buf); y += 11;
+    snprintf(buf, sizeof(buf), "Acesse: %s", AP_IP.toString().c_str());
+    u8g2.drawStr(2, y, buf); y += 11;
   }
+
+  unsigned long upSec = millis() / 1000UL;
+  snprintf(buf, sizeof(buf), "Uptime: %luh %lum", upSec / 3600UL, (upSec % 3600UL) / 60UL);
+  u8g2.drawStr(2, y, buf); y += 11;
+
+  snprintf(buf, sizeof(buf), "Heap livre: %uKB", ESP.getFreeHeap() / 1024);
+  u8g2.drawStr(2, y, buf);
 
   u8g2.sendBuffer();
 }
@@ -394,14 +504,14 @@ void enterState(EyeType eye) {
   currentEye  = eye;
   stateTimer  = millis();
   if (eye == EYE_NEUTRO) {
-    stateDuration = neutralDuration();
+    stateDuration = dayMode ? DAY_MODE_INTERVAL : neutralDuration();
     blinkTimer    = millis();
     nextBlinkIn   = nextBlinkDelay();
     blinking      = false;
   } else if (eye == EYE_BLINK) {
     stateDuration = BLINK_DURATION;
   } else {
-    stateDuration = expressionDuration();
+    stateDuration = dayMode ? dayExpressionDuration() : expressionDuration();
   }
 }
 
@@ -414,6 +524,10 @@ EyeType randomExpression() {
     EYE_CANSADO,
     EYE_FURIA,
     EYE_RASCAL,
+    EYE_SURPRESO,
+    EYE_APAIXONADO,
+    EYE_PISCADINHA,
+    EYE_CONFUSO,
   };
   int count = sizeof(options) / sizeof(options[0]);
   EyeType picked;
@@ -450,7 +564,7 @@ void updateServo() {
   }
 
   // Suaviza o movimento
-  servoCurrentAngle += (targetAngle - servoCurrentAngle) * SERVO_SMOOTH;
+  servoCurrentAngle += (targetAngle - servoCurrentAngle) * servoSmoothCfg;
 
   // Limita range e escreve
   int angle = constrain((int)round(servoCurrentAngle),
@@ -476,7 +590,12 @@ void updateStateMachine() {
   }
   if (currentEye == EYE_NEUTRO) {
     updateMovement();
-    if (now - stateTimer > stateDuration) { previousEye = EYE_NEUTRO; enterState(randomExpression()); return; }
+    if (now - stateTimer > stateDuration) {
+      previousEye = EYE_NEUTRO;
+      enterState(randomExpression());
+      if (dayMode) beep(DAY_EXPR_BEEP_FREQ, DAY_EXPR_BEEP_DUR);  // aviso sonoro baixo (modo dia)
+      return;
+    }
     if (!blinking && now - blinkTimer > nextBlinkIn) { previousEye = EYE_NEUTRO; enterState(EYE_BLINK); }
   } else if (currentEye == EYE_BLINK) {
     if (now - stateTimer > stateDuration) { enterState(EYE_NEUTRO); blinkTimer = millis(); nextBlinkIn = nextBlinkDelay(); }
@@ -492,19 +611,21 @@ void checkSleepMode() {
   tickClock();
 
   int h = cachedHour;
-  bool shouldSleep = (h >= SLEEP_HOUR_START || h < SLEEP_HOUR_END);
+  bool shouldSleep = (h >= sleepStartCfg || h < sleepEndCfg);
 
   if (shouldSleep && !sleepMode) {
     // Entra no modo sono
     sleepMode = true;
+    dayMode   = false;
     forcedEye = EYE_DORMIDO;
     Serial.printf("[Sleep] Entrando em modo sono (%02d:xx)\n", h);
 
   } else if (!shouldSleep && sleepMode) {
-    // Acorda
+    // Acorda — entra no modo dia
     sleepMode = false;
+    dayMode   = true;
     forcedEye = EYE_NEUTRO;
-    Serial.printf("[Sleep] Acordando (%02d:xx)\n", h);
+    Serial.printf("[Sleep] Acordando (%02d:xx) — modo dia ativo\n", h);
   }
 }
 
@@ -552,10 +673,15 @@ void doSyncWeather() {
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
+  // "daily" traz max/min/código de tempo dos próximos dias (index 0 = hoje);
+  // forecast_days=4 garante os 3 dias seguintes a hoje em índices 1..3.
   String url = "https://api.open-meteo.com/v1/forecast"
                "?latitude=" LOC_LAT
                "&longitude=" LOC_LON
                "&current_weather=true"
+               "&daily=temperature_2m_max,temperature_2m_min,weathercode"
+               "&forecast_days=4"
+               "&timezone=auto"
                "&temperature_unit=celsius";
   http.begin(client, url);
   http.setTimeout(10000);
@@ -570,9 +696,22 @@ void doSyncWeather() {
     if (!err) {
       cachedTemp  = doc["current_weather"]["temperature"] | 0.0f;
       cachedWCode = doc["current_weather"]["weathercode"] | 0;
+      todayMax    = doc["daily"]["temperature_2m_max"][0] | 0.0f;
+      todayMin    = doc["daily"]["temperature_2m_min"][0] | 0.0f;
       weatherReady     = true;
       lastWeatherFetch = millis();
-      Serial.printf("[Weather] Temp=%.1f Code=%d\n", cachedTemp, cachedWCode);
+      Serial.printf("[Weather] Temp=%.1f Code=%d Min/Max=%.0f/%.0f\n",
+                     cachedTemp, cachedWCode, todayMin, todayMax);
+
+      for (int i = 0; i < 3; i++) {
+        forecastMax[i]   = doc["daily"]["temperature_2m_max"][i + 1] | 0.0f;
+        forecastMin[i]   = doc["daily"]["temperature_2m_min"][i + 1] | 0.0f;
+        forecastWCode[i] = doc["daily"]["weathercode"][i + 1]       | 0;
+      }
+      forecastReady = true;
+      Serial.printf("[Weather] Previsao: %.0f/%.0f, %.0f/%.0f, %.0f/%.0f\n",
+                     forecastMax[0], forecastMin[0], forecastMax[1], forecastMin[1],
+                     forecastMax[2], forecastMin[2]);
     } else {
       Serial.println("[Weather] JSON erro: " + String(err.c_str()));
     }
@@ -671,14 +810,22 @@ void activateWeather() {
   if (!weatherReady || millis() - lastWeatherFetch > WEATHER_RESYNC_INTERVAL) doSyncWeather();
 }
 
+// Previsão dos próximos 3 dias — usa o mesmo cache/fetch do clima atual
+void activateForecast() {
+  specialMode    = MODE_FORECAST;
+  specialModeEnd = millis() + SPECIAL_MODE_DURATION;
+  beep(BUZZER_FREQ_HIGH);
+  if (!forecastReady || millis() - lastWeatherFetch > WEATHER_RESYNC_INTERVAL) doSyncWeather();
+}
+
 void activateFocusSetup() {
   specialMode  = MODE_FOCUS_SETUP;
   focusMinutes = FOCUS_MIN_TIME;  // reseta para o mínimo
   beep(BUZZER_FREQ_HIGH);
 }
 
-void activateWebInfo() {
-  specialMode    = MODE_WEB_INFO;
+void activateStatus() {
+  specialMode    = MODE_STATUS;
   specialModeEnd = millis() + SPECIAL_MODE_DURATION;
   beep(BUZZER_FREQ_HIGH);
 }
@@ -740,17 +887,17 @@ void handleButtons() {
       if (held >= FOCUS_HOLD_MS) {
         startFocusRun();  // clique longo → inicia foco
       } else {
-        // clique curto no setup (3º click) → mostra como acessar o modo web
-        activateWebInfo();
+        // clique curto no setup (3º click) → mostra status do dispositivo
+        activateStatus();
       }
     }
     return;
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  //  MODO INFO WEB: qualquer clique volta ao neutro
+  //  MODO STATUS: qualquer clique volta ao neutro (3º click do botão)
   // ═══════════════════════════════════════════════════════════════════
-  if (specialMode == MODE_WEB_INFO) {
+  if (specialMode == MODE_STATUS) {
     if (button.getSingleDebouncedPress() || touch.getSingleDebouncedPress()) {
       specialMode = MODE_NONE;
       forcedEye   = EYE_NEUTRO;
@@ -759,7 +906,7 @@ void handleButtons() {
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  //  MODO CLOCK: touch troca para clima
+  //  MODO CLOCK: touch troca para clima atual
   // ═══════════════════════════════════════════════════════════════════
   if (specialMode == MODE_CLOCK) {
     if (touch.getSingleDebouncedPress()) {
@@ -773,9 +920,22 @@ void handleButtons() {
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  //  MODO CLIMA: touch volta para hora
+  //  MODO CLIMA: touch avança para a previsão dos próximos 3 dias
   // ═══════════════════════════════════════════════════════════════════
   if (specialMode == MODE_WEATHER) {
+    if (touch.getSingleDebouncedPress()) {
+      activateForecast();
+    }
+    if (button.getSingleDebouncedPress()) {
+      activateFocusSetup();
+    }
+    return;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  MODO PREVISÃO: touch volta para a hora
+  // ═══════════════════════════════════════════════════════════════════
+  if (specialMode == MODE_FORECAST) {
     if (touch.getSingleDebouncedPress()) {
       activateClock();
     }
@@ -806,6 +966,12 @@ void handleButtons() {
 void normalEye(int posX, int posY, int tamX, int tamY) { u8g2.drawEllipse(posX, posY, tamX, tamY); }
 void halfEye(int posX, int posY, int tam, int start, int finish) { u8g2.drawArc(posX, posY, tam, start, finish); }
 void lineEye(int posX, int posY, int tam) { u8g2.drawHLine(posX, posY, tam); }
+void heartEye(int posX, int posY, int size) {
+  int r = size / 2;
+  u8g2.drawDisc(posX - r/2, posY - r/3, r/2);
+  u8g2.drawDisc(posX + r/2, posY - r/3, r/2);
+  u8g2.drawTriangle(posX - r, posY - r/4, posX + r, posY - r/4, posX, posY + r);
+}
 
 void renderEyes(int tamX, int tamY, int esp) {
   int lPosX = round(currentX) + EYE_LEFT;
@@ -848,6 +1014,23 @@ void renderEyes(int tamX, int tamY, int esp) {
     case EYE_RASCAL:
       for (int i = 0; i < esp; i++) { halfEye(lPosX, posY, tamX+i, 130, 0); halfEye(rPosX, posY, tamX+i, 130, 0); }
       break;
+    case EYE_SURPRESO:
+      for (int i = 0; i < esp; i++) { normalEye(lPosX, posY, tamX+i+6, tamY+i+6); normalEye(rPosX, posY, tamX+i+6, tamY+i+6); }
+      break;
+    case EYE_APAIXONADO:
+      { int hs = tamX + tamY;  // coração maior que o padrão dos outros olhos
+        heartEye(lPosX, posY, hs);
+        heartEye(rPosX, posY, hs); }
+      break;
+    case EYE_PISCADINHA:
+      for (int i = 0; i < esp; i++) { normalEye(lPosX, posY, tamX+i, tamY+i); }
+      for (int i = 0; i < esp; i++) { lineEye(rPosX-15, posY+i, tamX+20); }
+      break;
+    case EYE_CONFUSO:
+      for (int i = 0; i < esp; i++) { halfEye(lPosX, posY, tamX+i, 0, 130); halfEye(rPosX, posY-6, tamX+i, -160, -35); }
+      u8g2.setFont(u8g2_font_6x10_tr);
+      u8g2.drawStr(rPosX+10, posY-18, "?");
+      break;
     default: break;
   }
 }
@@ -875,29 +1058,87 @@ void handleScan() {
 
 static const char* PAGE_STYLE = R"css(
 <style>
+  :root{
+    --bg:#0f1115; --surface:#181c23; --surface2:#20252e; --border:#2a2f3a;
+    --accent:#4af; --accent-dim:#2c6fa3; --text:#eee; --muted:#9aa4b2;
+    --danger:#f66; --warn:#fa4; --ok:#4d8;
+  }
   *{box-sizing:border-box}
-  body{font-family:sans-serif;background:#111;color:#eee;text-align:center;padding:24px;margin:0}
-  h1{color:#4af;margin-bottom:4px}
-  p{color:#aaa;margin:4px 0 16px}
+  body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);margin:0}
+  h1{color:var(--accent);margin:0 0 4px;font-size:1.3rem}
+  p{color:var(--muted);margin:4px 0 16px}
   input{width:100%;max-width:320px;padding:10px 14px;border-radius:8px;
-        border:2px solid #4af;background:#1a1a1a;color:#eee;font-size:1rem;margin:6px 0}
-  input[type=range]{padding:0;border:none;background:transparent;height:24px}
-  .servo-vals{font-size:.8rem;color:#aaa;margin:2px 0 8px}
-  button{background:#222;color:#eee;border:2px solid #4af;border-radius:8px;
-         padding:12px 20px;font-size:1rem;cursor:pointer;min-width:110px;margin:4px}
-  button:hover{background:#4af;color:#111}
+        border:2px solid var(--accent);background:var(--surface2);color:var(--text);font-size:1rem;margin:6px 0}
+  input[type=range]{padding:0;border:none;background:transparent;height:24px;accent-color:var(--accent)}
+  select{padding:8px 10px;border-radius:8px;border:2px solid var(--accent);
+         background:var(--surface2);color:var(--text);font-size:.95rem;width:100%}
+  .servo-vals{font-size:.8rem;color:var(--muted);margin:2px 0 8px}
+  button{background:var(--surface2);color:var(--text);border:2px solid var(--accent);border-radius:8px;
+         padding:12px 20px;font-size:1rem;cursor:pointer;min-width:110px;margin:4px;
+         transition:background .15s,transform .1s}
+  button:hover{background:var(--accent);color:#111}
+  button:active{transform:scale(.97)}
   .grid{display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin:20px 0}
-  #status{margin-top:16px;font-size:.9rem;color:#aaa}
-  .card{background:#1a1a1a;border:1px solid #333;border-radius:12px;padding:24px;max-width:360px;margin:0 auto}
-  label{display:block;text-align:left;font-size:.85rem;color:#aaa;margin-top:10px}
+  #status{margin-top:16px;font-size:.9rem;color:var(--muted)}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px;max-width:360px;margin:0 auto}
+  label{display:block;text-align:left;font-size:.85rem;color:var(--muted);margin-top:10px}
   .net-list{list-style:none;padding:0;margin:10px 0;max-height:200px;overflow-y:auto}
   .net-item{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;margin:4px 0;
-            background:#222;border:1px solid #333;border-radius:8px;cursor:pointer;transition:background .2s}
-  .net-item:hover,.net-item.selected{background:#1a3a5c;border-color:#4af}
+            background:var(--surface2);border:1px solid var(--border);border-radius:8px;cursor:pointer;transition:background .2s}
+  .net-item:hover,.net-item.selected{background:var(--accent-dim);border-color:var(--accent)}
   .net-ssid{font-size:.95rem;font-weight:bold}
   .net-info{font-size:.75rem;color:#888}
   .scan-btn{font-size:.8rem;padding:6px 14px;margin-bottom:10px}
-  .separator{border:none;border-top:1px solid #333;margin:14px 0}
+  .separator{border:none;border-top:1px solid var(--border);margin:14px 0}
+  .center-page{text-align:center;padding:24px}
+</style>
+)css";
+
+// ── CSS específico do painel de controle (app com menu lateral) ────────
+static const char* PANEL_STYLE = R"css(
+<style>
+  html,body{height:100%}
+  body{overflow:hidden}
+  .app{display:flex;flex-direction:column;height:100vh}
+  .topbar{display:flex;align-items:center;justify-content:space-between;gap:10px;
+          padding:10px 16px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0}
+  .topbar h1{font-size:1.05rem}
+  .statusline{font-size:.72rem;color:var(--muted);text-align:right;line-height:1.3;white-space:nowrap}
+  .statusline b{color:var(--text)}
+  .layout{display:flex;flex:1;min-height:0}
+  .sidebar{display:flex;flex-direction:column;gap:4px;width:86px;flex-shrink:0;
+           background:var(--surface);border-right:1px solid var(--border);padding:10px 6px;overflow-y:auto}
+  .nav-item{display:flex;flex-direction:column;align-items:center;gap:2px;
+            background:none;border:2px solid transparent;border-radius:10px;padding:10px 4px;
+            color:var(--muted);cursor:pointer;min-width:0;margin:0;font-size:.66rem;width:100%}
+  .nav-item .nav-icon{font-size:1.5rem}
+  .nav-item:hover{background:var(--surface2);color:var(--text)}
+  .nav-item.active{background:var(--accent-dim);border-color:var(--accent);color:#fff}
+  .content{flex:1;overflow-y:auto;padding:18px}
+  .tab{display:none}
+  .tab.active{display:block}
+  .emo-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(78px,1fr));gap:10px;max-width:640px;margin:0 auto}
+  .emo-card{display:flex;flex-direction:column;align-items:center;gap:4px;
+            background:var(--surface);border:1px solid var(--border);border-radius:12px;
+            padding:14px 6px;cursor:pointer;transition:background .15s,border-color .15s}
+  .emo-card:hover{background:var(--surface2);border-color:var(--accent)}
+  .emo-card .emo-icon{font-size:1.8rem}
+  .emo-card .emo-label{font-size:.7rem;color:var(--muted)}
+  .settings-card{max-width:420px;margin:0 auto 18px}
+  .settings-card h2{font-size:.95rem;color:var(--text);margin:0 0 4px}
+  .settings-card .sub{font-size:.75rem;color:var(--muted);margin:0 0 12px}
+  .btn-row{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:8px}
+  .btn-sm{font-size:.8rem;padding:8px 14px;min-width:auto}
+  .btn-save{border-color:var(--ok);color:var(--ok)}
+  .btn-warn{border-color:var(--warn);color:var(--warn)}
+  .btn-danger{border-color:var(--danger);color:var(--danger)}
+  .sleep-row{display:flex;gap:10px}
+  .sleep-row>div{flex:1}
+  #panelStatus{text-align:center;max-width:640px;margin:14px auto 0}
+  @media (max-width:420px){
+    .sidebar{width:68px} .nav-item{font-size:.6rem} .nav-item .nav-icon{font-size:1.3rem}
+    .statusline{font-size:.65rem}
+  }
 </style>
 )css";
 
@@ -909,6 +1150,7 @@ void handleRoot() {
   html += PAGE_STYLE;
   html += R"rawhtml(
 </head><body>
+<div class="center-page">
 <h1>&#128065; DrawEye</h1>
 <p>Selecione sua rede Wi-Fi</p>
 <div class="card">
@@ -923,6 +1165,7 @@ void handleRoot() {
   <button onclick="conectar()">Conectar</button>
 </div>
 <p id="status"></p>
+</div>
 <script>
 function rssiBar(r){return r>-55?'▂▄▆█':r>-70?'▂▄▆_':r>-80?'▂▄__':'▂___';}
 async function scan(){
@@ -994,76 +1237,242 @@ void handlePanel() {
   if (!webWifiConnected) { server.sendHeader("Location", "/"); server.send(302); return; }
   String html = "<!DOCTYPE html><html lang='pt-BR'><head><meta charset='UTF-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<title>DrawEye - Controle</title>";
+    "<title>DrawEye - Painel</title>";
   html += PAGE_STYLE;
+  html += PANEL_STYLE;
   html += R"rawhtml(
 </head><body>
-<h1>&#128065; DrawEye</h1>
-<p>Controle remoto das expressoes</p>
-<div class="grid">
-  <button onclick="setEye('neutro')">Neutro</button>
-  <button onclick="setEye('feliz')">Feliz</button>
-  <button onclick="setEye('triste')">Triste</button>
-  <button onclick="setEye('malvado')">Malvado</button>
-  <button onclick="setEye('dormido')">Dormido</button>
-  <button onclick="setEye('cansado')">Cansado</button>
-  <button onclick="setEye('furia')">Furia</button>
-  <button onclick="setEye('rascal')">Rascal</button>
-  <button onclick="setEye('random')">Aleatorio</button>
-</div>
-<p id="status">Pronto.</p>
+<div class="app">
+  <header class="topbar">
+    <h1>&#128065; DrawEye</h1>
+    <div class="statusline" id="statusline">Carregando&hellip;</div>
+  </header>
+  <div class="layout">
+    <nav class="sidebar">
+      <button class="nav-item active" id="nav-emocoes" onclick="showTab('emocoes')">
+        <span class="nav-icon">&#128522;</span><span>Emoções</span>
+      </button>
+      <button class="nav-item" id="nav-ajustes" onclick="showTab('ajustes')">
+        <span class="nav-icon">&#9881;&#65039;</span><span>Ajustes</span>
+      </button>
+    </nav>
+    <main class="content">
+      <section id="tab-emocoes" class="tab active">
+        <div class="emo-grid">
+          <div class="emo-card" onclick="setEye('neutro')"><span class="emo-icon">&#128528;</span><span class="emo-label">Neutro</span></div>
+          <div class="emo-card" onclick="setEye('feliz')"><span class="emo-icon">&#128522;</span><span class="emo-label">Feliz</span></div>
+          <div class="emo-card" onclick="setEye('triste')"><span class="emo-icon">&#128546;</span><span class="emo-label">Triste</span></div>
+          <div class="emo-card" onclick="setEye('malvado')"><span class="emo-icon">&#128520;</span><span class="emo-label">Malvado</span></div>
+          <div class="emo-card" onclick="setEye('dormido')"><span class="emo-icon">&#128564;</span><span class="emo-label">Dormido</span></div>
+          <div class="emo-card" onclick="setEye('cansado')"><span class="emo-icon">&#129396;</span><span class="emo-label">Cansado</span></div>
+          <div class="emo-card" onclick="setEye('furia')"><span class="emo-icon">&#128545;</span><span class="emo-label">Fúria</span></div>
+          <div class="emo-card" onclick="setEye('rascal')"><span class="emo-icon">&#128527;</span><span class="emo-label">Rascal</span></div>
+          <div class="emo-card" onclick="setEye('surpreso')"><span class="emo-icon">&#128562;</span><span class="emo-label">Surpreso</span></div>
+          <div class="emo-card" onclick="setEye('apaixonado')"><span class="emo-icon">&#128525;</span><span class="emo-label">Apaixonado</span></div>
+          <div class="emo-card" onclick="setEye('piscadinha')"><span class="emo-icon">&#128521;</span><span class="emo-label">Piscadinha</span></div>
+          <div class="emo-card" onclick="setEye('confuso')"><span class="emo-icon">&#128533;</span><span class="emo-label">Confuso</span></div>
+          <div class="emo-card" onclick="setEye('random')"><span class="emo-icon">&#127922;</span><span class="emo-label">Aleatório</span></div>
+        </div>
+      </section>
 
-<div class="card" style="margin-top:20px">
-  <p style="margin-top:0">&#9881; Ajuste do servo (cabeca)</p>
-  <label>Centro: <span id="centerVal">90</span>&deg;</label>
-  <input type="range" id="servoCenter" min="0" max="180" value="90" oninput="atualizarLabelsServo()">
-  <label>Amplitude para cada lado: <span id="rangeVal">30</span>&deg;</label>
-  <input type="range" id="servoRange" min="0" max="90" value="30" oninput="atualizarLabelsServo()">
-  <p class="servo-vals">Vai de <b id="minAngle">60</b>&deg; a <b id="maxAngle">120</b>&deg;</p>
-  <button onclick="testarServo()" style="font-size:.8rem;padding:6px 12px">Testar</button>
-  <button onclick="salvarServo()" style="font-size:.8rem;padding:6px 12px;border-color:#4a4;color:#4a4">Salvar</button>
-</div>
+      <section id="tab-ajustes" class="tab">
+        <div class="card settings-card">
+          <h2>&#9881;&#65039; Servo (cabeça)</h2>
+          <p class="sub">Posição central, amplitude e suavidade do movimento</p>
+          <label>Centro: <span id="centerVal">90</span>&deg;</label>
+          <input type="range" id="servoCenter" min="0" max="180" value="90" oninput="atualizarLabelsServo()" onchange="aplicarServo()">
+          <label>Amplitude para cada lado: <span id="rangeVal">30</span>&deg;</label>
+          <input type="range" id="servoRange" min="0" max="90" value="30" oninput="atualizarLabelsServo()" onchange="aplicarServo()">
+          <p class="servo-vals">Vai de <b id="minAngle">60</b>&deg; a <b id="maxAngle">120</b>&deg;</p>
+          <label>Suavidade: <span id="smoothVal">0.09</span> (menor = mais lento)</label>
+          <input type="range" id="servoSmooth" min="2" max="50" value="9" oninput="atualizarLabelsServo()" onchange="aplicarServo()">
+          <div class="btn-row">
+            <button class="btn-sm" onclick="testarServo()">Testar</button>
+            <button class="btn-sm btn-save" onclick="salvarServo()">Salvar</button>
+          </div>
+        </div>
 
-<button onclick="window.location.href='/'" style="font-size:.8rem;padding:6px 12px;margin-top:20px">Trocar Wi-Fi</button>
-<button onclick="reiniciar()" style="font-size:.8rem;padding:6px 12px;margin-top:6px;border-color:#fa4;color:#fa4">Reiniciar DrawEye</button>
-<button onclick="esquecer()" style="font-size:.8rem;padding:6px 12px;margin-top:6px;border-color:#f66;color:#f66">Esquecer rede salva</button>
+        <div class="card settings-card">
+          <h2>&#128065; Tamanho dos olhos</h2>
+          <p class="sub">Raio horizontal, raio vertical e espessura do traço</p>
+          <label>Raio horizontal: <span id="sizeXVal">14</span>px</label>
+          <input type="range" id="eyeSizeX" min="5" max="30" value="14" oninput="atualizarLabelsOlhos()" onchange="aplicarOlhos()">
+          <label>Raio vertical: <span id="sizeYVal">15</span>px</label>
+          <input type="range" id="eyeSizeY" min="5" max="30" value="15" oninput="atualizarLabelsOlhos()" onchange="aplicarOlhos()">
+          <label>Espessura: <span id="thickVal">6</span></label>
+          <input type="range" id="eyeThick" min="1" max="12" value="6" oninput="atualizarLabelsOlhos()" onchange="aplicarOlhos()">
+          <div class="btn-row">
+            <button class="btn-sm btn-save" onclick="salvarOlhos()">Salvar</button>
+          </div>
+        </div>
+
+        <div class="card settings-card">
+          <h2>&#127769; Horário do modo sono</h2>
+          <p class="sub">Fora deste intervalo, o modo dia fica ativo</p>
+          <div class="sleep-row">
+            <div>
+              <label>Dorme às</label>
+              <select id="sleepStart" onchange="aplicarSono()"></select>
+            </div>
+            <div>
+              <label>Acorda às</label>
+              <select id="sleepEnd" onchange="aplicarSono()"></select>
+            </div>
+          </div>
+          <div class="btn-row">
+            <button class="btn-sm btn-save" onclick="salvarSono()">Salvar</button>
+          </div>
+        </div>
+
+        <div class="card settings-card">
+          <h2>&#128295; Dispositivo</h2>
+          <p class="sub" id="deviceInfo">&mdash;</p>
+          <div class="btn-row">
+            <button class="btn-sm" onclick="window.location.href='/'">Trocar Wi-Fi</button>
+            <button class="btn-sm btn-warn" onclick="reiniciar()">Reiniciar</button>
+            <button class="btn-sm btn-danger" onclick="esquecer()">Esquecer rede</button>
+          </div>
+        </div>
+      </section>
+
+      <p id="panelStatus">Pronto.</p>
+    </main>
+  </div>
+</div>
 <script>
+function showTab(name){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  document.getElementById('tab-'+name).classList.add('active');
+  document.getElementById('nav-'+name).classList.add('active');
+}
+
+async function setEye(name){
+  document.getElementById('panelStatus').textContent='Enviando: '+name+'...';
+  try{const r=await fetch('/eye?name='+name);const t=await r.text();document.getElementById('panelStatus').textContent=t;}
+  catch(e){document.getElementById('panelStatus').textContent='Erro: '+e;}
+}
+
+// ── Servo ──────────────────────────────────────────────────────────
 function atualizarLabelsServo(){
   const c = parseInt(document.getElementById('servoCenter').value);
   const r = parseInt(document.getElementById('servoRange').value);
+  const s = parseInt(document.getElementById('servoSmooth').value);
   document.getElementById('centerVal').textContent = c;
   document.getElementById('rangeVal').textContent = r;
   document.getElementById('minAngle').textContent = Math.max(0, c - r);
   document.getElementById('maxAngle').textContent = Math.min(180, c + r);
+  document.getElementById('smoothVal').textContent = (s/100).toFixed(2);
 }
 async function carregarServo(){
   try{
     const r = await fetch('/servo'); const j = await r.json();
     document.getElementById('servoCenter').value = j.center;
     document.getElementById('servoRange').value  = j.range;
+    document.getElementById('servoSmooth').value = Math.round(j.smooth*100);
     atualizarLabelsServo();
   }catch(e){}
 }
-async function testarServo(){
+async function aplicarServo(){
   const c = document.getElementById('servoCenter').value;
   const r = document.getElementById('servoRange').value;
-  try{ await fetch('/servo?center='+c+'&range='+r); document.getElementById('status').textContent='Testando servo...'; }
-  catch(e){ document.getElementById('status').textContent='Erro: '+e; }
+  const s = (document.getElementById('servoSmooth').value/100).toFixed(2);
+  try{ await fetch('/servo?center='+c+'&range='+r+'&smooth='+s); }catch(e){}
+}
+async function testarServo(){
+  await aplicarServo();
+  document.getElementById('panelStatus').textContent='Testando servo...';
 }
 async function salvarServo(){
   const c = document.getElementById('servoCenter').value;
   const r = document.getElementById('servoRange').value;
+  const s = (document.getElementById('servoSmooth').value/100).toFixed(2);
   try{
-    await fetch('/servo?center='+c+'&range='+r+'&save=1');
-    document.getElementById('status').textContent='Servo salvo: centro '+c+'°, amplitude ±'+r+'°';
-  }catch(e){ document.getElementById('status').textContent='Erro: '+e; }
+    await fetch('/servo?center='+c+'&range='+r+'&smooth='+s+'&save=1');
+    document.getElementById('panelStatus').textContent='Servo salvo: centro '+c+'°, amplitude ±'+r+'°, smooth '+s;
+  }catch(e){ document.getElementById('panelStatus').textContent='Erro: '+e; }
 }
-window.addEventListener('load', carregarServo);
-</script>
-<script>
+
+// ── Tamanho dos olhos ─────────────────────────────────────────────
+function atualizarLabelsOlhos(){
+  document.getElementById('sizeXVal').textContent = document.getElementById('eyeSizeX').value;
+  document.getElementById('sizeYVal').textContent = document.getElementById('eyeSizeY').value;
+  document.getElementById('thickVal').textContent = document.getElementById('eyeThick').value;
+}
+async function carregarOlhos(){
+  try{
+    const r = await fetch('/eyesize'); const j = await r.json();
+    document.getElementById('eyeSizeX').value = j.sizex;
+    document.getElementById('eyeSizeY').value = j.sizey;
+    document.getElementById('eyeThick').value = j.thick;
+    atualizarLabelsOlhos();
+  }catch(e){}
+}
+async function aplicarOlhos(){
+  const x = document.getElementById('eyeSizeX').value;
+  const y = document.getElementById('eyeSizeY').value;
+  const t = document.getElementById('eyeThick').value;
+  try{ await fetch('/eyesize?sizex='+x+'&sizey='+y+'&thick='+t); }catch(e){}
+}
+async function salvarOlhos(){
+  await aplicarOlhos();
+  try{
+    const x = document.getElementById('eyeSizeX').value;
+    const y = document.getElementById('eyeSizeY').value;
+    const t = document.getElementById('eyeThick').value;
+    await fetch('/eyesize?sizex='+x+'&sizey='+y+'&thick='+t+'&save=1');
+    document.getElementById('panelStatus').textContent='Tamanho dos olhos salvo.';
+  }catch(e){ document.getElementById('panelStatus').textContent='Erro: '+e; }
+}
+
+// ── Horário de sono ───────────────────────────────────────────────
+function preencherHoras(sel){
+  for(let h=0;h<24;h++){
+    const opt=document.createElement('option');
+    opt.value=h; opt.textContent=String(h).padStart(2,'0')+':00';
+    sel.appendChild(opt);
+  }
+}
+async function carregarSono(){
+  const selS=document.getElementById('sleepStart'), selE=document.getElementById('sleepEnd');
+  preencherHoras(selS); preencherHoras(selE);
+  try{
+    const r = await fetch('/sleep'); const j = await r.json();
+    selS.value = j.start; selE.value = j.end;
+  }catch(e){}
+}
+async function aplicarSono(){
+  const s = document.getElementById('sleepStart').value;
+  const e = document.getElementById('sleepEnd').value;
+  try{ await fetch('/sleep?start='+s+'&end='+e); }catch(err){}
+}
+async function salvarSono(){
+  try{
+    const s = document.getElementById('sleepStart').value;
+    const e = document.getElementById('sleepEnd').value;
+    await fetch('/sleep?start='+s+'&end='+e+'&save=1');
+    document.getElementById('panelStatus').textContent='Horário de sono salvo.';
+  }catch(err){ document.getElementById('panelStatus').textContent='Erro: '+err; }
+}
+
+// ── Status / dispositivo ──────────────────────────────────────────
+function fmtUptime(sec){
+  const h=Math.floor(sec/3600), m=Math.floor((sec%3600)/60);
+  return h+'h '+m+'m';
+}
+async function atualizarStatus(){
+  try{
+    const r = await fetch('/status'); const j = await r.json();
+    const modo = j.sleep ? '&#127769; Sono' : '&#9728;&#65039; Dia';
+    document.getElementById('statusline').innerHTML =
+      '<b>'+j.wifi+'</b> &middot; '+modo+' &middot; '+fmtUptime(j.uptime);
+    document.getElementById('deviceInfo').textContent =
+      'IP: '+j.wifi+' · Uptime: '+fmtUptime(j.uptime)+' · Heap livre: '+Math.round(j.heap/1024)+'KB · Olho atual: '+j.eye;
+  }catch(e){}
+}
 async function reiniciar(){
   if(!confirm('Reiniciar o DrawEye agora?')) return;
-  document.getElementById('status').textContent='Reiniciando... aguarde alguns segundos.';
+  document.getElementById('panelStatus').textContent='Reiniciando... aguarde alguns segundos.';
   try{ await fetch('/restart'); }catch(e){}
 }
 async function esquecer(){
@@ -1071,14 +1480,14 @@ async function esquecer(){
   await fetch('/forget');
   alert('Rede apagada.');
 }
+
+carregarServo();
+carregarOlhos();
+carregarSono();
+atualizarStatus();
+setInterval(atualizarStatus, 5000);
 </script>
-<script>
-async function setEye(name){
-  document.getElementById('status').textContent='Enviando: '+name+'...';
-  try{const r=await fetch('/eye?name='+name);const t=await r.text();document.getElementById('status').textContent=t;}
-  catch(e){document.getElementById('status').textContent='Erro: '+e;}
-}
-</script></body></html>
+</body></html>
 )rawhtml";
   server.send(200, "text/html", html);
 }
@@ -1104,7 +1513,10 @@ void handleStatus() {
   String json = "{";
   json += "\"eye\":\"" + String(eyeNames[currentEye]) + "\",";
   json += "\"wifi\":\"" + WiFi.localIP().toString() + "\",";
-  json += "\"uptime\":" + String(millis()/1000);
+  json += "\"uptime\":" + String(millis()/1000) + ",";
+  json += "\"sleep\":" + String(sleepMode ? "true" : "false") + ",";
+  json += "\"day\":"   + String(dayMode   ? "true" : "false") + ",";
+  json += "\"heap\":"  + String(ESP.getFreeHeap());
   json += "}";
   server.send(200, "application/json", json);
 }
@@ -1117,18 +1529,20 @@ void handleRestart() {
   ESP.restart();
 }
 
-// ── Ajuste do servo: centro e amplitude (graus para cada lado) ────────
+// ── Ajuste do servo: centro, amplitude e smooth ───────────────────────
 void handleServo() {
   // Sem parâmetros → apenas consulta os valores atuais
-  if (!server.hasArg("center") && !server.hasArg("range")) {
+  if (!server.hasArg("center") && !server.hasArg("range") && !server.hasArg("smooth")) {
     String json = "{\"center\":" + String(servoCenterCfg) +
-                  ",\"range\":"  + String(servoRangeCfg) + "}";
+                  ",\"range\":"  + String(servoRangeCfg) +
+                  ",\"smooth\":" + String(servoSmoothCfg, 2) + "}";
     server.send(200, "application/json", json);
     return;
   }
 
   if (server.hasArg("center")) servoCenterCfg = constrain(server.arg("center").toInt(), 0, 180);
   if (server.hasArg("range"))  servoRangeCfg  = constrain(server.arg("range").toInt(), 0, 90);
+  if (server.hasArg("smooth")) servoSmoothCfg = constrain(server.arg("smooth").toFloat(), 0.02f, 0.50f);
 
   // Garante que centro ± amplitude não estoure os limites físicos (0-180°)
   if (servoCenterCfg - servoRangeCfg < 0)   servoRangeCfg = servoCenterCfg;
@@ -1141,7 +1555,49 @@ void handleServo() {
   if (server.hasArg("save")) saveServoConfig();
 
   String json = "{\"center\":" + String(servoCenterCfg) +
-                ",\"range\":"  + String(servoRangeCfg) + "}";
+                ",\"range\":"  + String(servoRangeCfg) +
+                ",\"smooth\":" + String(servoSmoothCfg, 2) + "}";
+  server.send(200, "application/json", json);
+}
+
+// ── Ajuste do tamanho dos olhos: raio X, raio Y e espessura ───────────
+void handleEyeSize() {
+  if (!server.hasArg("sizex") && !server.hasArg("sizey") && !server.hasArg("thick")) {
+    String json = "{\"sizex\":" + String(eyeSizeXCfg) +
+                  ",\"sizey\":" + String(eyeSizeYCfg) +
+                  ",\"thick\":" + String(eyeThicknessCfg) + "}";
+    server.send(200, "application/json", json);
+    return;
+  }
+
+  if (server.hasArg("sizex")) eyeSizeXCfg     = constrain(server.arg("sizex").toInt(), 5, 30);
+  if (server.hasArg("sizey")) eyeSizeYCfg     = constrain(server.arg("sizey").toInt(), 5, 30);
+  if (server.hasArg("thick")) eyeThicknessCfg = constrain(server.arg("thick").toInt(), 1, 12);
+
+  if (server.hasArg("save")) saveEyeConfig();
+
+  String json = "{\"sizex\":" + String(eyeSizeXCfg) +
+                ",\"sizey\":" + String(eyeSizeYCfg) +
+                ",\"thick\":" + String(eyeThicknessCfg) + "}";
+  server.send(200, "application/json", json);
+}
+
+// ── Ajuste do horário do modo sono: hora de início e de fim ───────────
+void handleSleepCfg() {
+  if (!server.hasArg("start") && !server.hasArg("end")) {
+    String json = "{\"start\":" + String(sleepStartCfg) +
+                  ",\"end\":"   + String(sleepEndCfg) + "}";
+    server.send(200, "application/json", json);
+    return;
+  }
+
+  if (server.hasArg("start")) sleepStartCfg = constrain(server.arg("start").toInt(), 0, 23);
+  if (server.hasArg("end"))   sleepEndCfg   = constrain(server.arg("end").toInt(), 0, 23);
+
+  if (server.hasArg("save")) saveSleepConfig();
+
+  String json = "{\"start\":" + String(sleepStartCfg) +
+                ",\"end\":"   + String(sleepEndCfg) + "}";
   server.send(200, "application/json", json);
 }
 
@@ -1159,6 +1615,8 @@ void setupWebServer() {
   server.on("/status",  handleStatus);
   server.on("/restart", handleRestart);
   server.on("/servo",   handleServo);
+  server.on("/eyesize", handleEyeSize);
+  server.on("/sleep",   handleSleepCfg);
   server.begin();
   Serial.println("[Web] Servidor iniciado");
 }
@@ -1251,8 +1709,10 @@ void setup() {
   u8g2.begin();
   randomSeed(analogRead(0));
 
-  // Servo
+  // Servo / olhos / sono — configs persistidas em NVS
   loadServoConfig();
+  loadEyeConfig();
+  loadSleepConfig();
   ESP32PWM::allocateTimer(0);
   headServo.setPeriodHertz(50);
   headServo.attach(SERVO_PIN, 500, 2400);
@@ -1294,11 +1754,12 @@ void loop() {
       return;
     }
 
-    // Clock / Weather / Web Info: exibe por SPECIAL_MODE_DURATION
+    // Clock / Weather / Forecast / Status: exibe por SPECIAL_MODE_DURATION
     if (millis() < specialModeEnd) {
       if (specialMode == MODE_CLOCK)    drawClock();
       if (specialMode == MODE_WEATHER)  drawWeather();
-      if (specialMode == MODE_WEB_INFO) drawWebInfo();
+      if (specialMode == MODE_FORECAST) drawForecast();
+      if (specialMode == MODE_STATUS)   drawStatus();
     } else {
       specialMode = MODE_NONE;
       // Se o touch mostrou a hora durante o sono, volta a dormir (não ao neutro)
@@ -1317,7 +1778,7 @@ void loop() {
   // Animação normal
   updateStateMachine();
   u8g2.clearBuffer();
-  renderEyes(EYE_SIZE_X, EYE_SIZE_Y, EYE_THICKNESS);
+  renderEyes(eyeSizeXCfg, eyeSizeYCfg, eyeThicknessCfg);
   u8g2.sendBuffer();
   delay(LOOP_DELAY_MS);
 }

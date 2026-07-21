@@ -70,5 +70,14 @@
 #define SLEEP_HOUR_START  23   // hora de entrar em modo sono
 #define SLEEP_HOUR_END    9    // hora de acordar
 
+// ── Modo dia (contraste com o modo sono) ──────────────────────────────
+// Enquanto acordado, a cada DAY_MODE_INTERVAL o olho faz uma expressão
+// automática que dura entre DAY_EXPR_DURATION_MIN e _MAX, e volta ao neutro.
+#define DAY_MODE_INTERVAL      30000  // ms entre expressões automáticas
+#define DAY_EXPR_DURATION_MIN   3000  // ms — duração mínima da expressão
+#define DAY_EXPR_DURATION_MAX   5000  // ms — duração máxima da expressão
+#define DAY_EXPR_BEEP_FREQ        500  // Hz — aviso sonoro baixo ao trocar de expressão
+#define DAY_EXPR_BEEP_DUR          40  // ms
+
 #define SPECIAL_MODE_DURATION 10000
 #define SERVO_PIN 17
