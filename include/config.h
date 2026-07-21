@@ -71,11 +71,14 @@
 #define SLEEP_HOUR_END    9    // hora de acordar
 
 // ── Modo dia (contraste com o modo sono) ──────────────────────────────
-// Enquanto acordado, a cada DAY_MODE_INTERVAL o olho faz uma expressão
-// automática que dura entre DAY_EXPR_DURATION_MIN e _MAX, e volta ao neutro.
-#define DAY_MODE_INTERVAL      30000  // ms entre expressões automáticas
-#define DAY_EXPR_DURATION_MIN   3000  // ms — duração mínima da expressão
-#define DAY_EXPR_DURATION_MAX   5000  // ms — duração máxima da expressão
+// Enquanto acordado, o ciclo é: NEUTRO (centrado, só piscando) por
+// NEUTRAL_HOLD_DURATION → expressão aleatória por EXPR_HOLD_DURATION → NEUTRO
+// de novo. A cada CURIOUS_INTERVAL de tempo nesse ciclo, uma pausa de
+// CURIOUS_DURATION no modo CURIOSO (olhando em volta) antes de continuar.
+#define NEUTRAL_HOLD_DURATION  20000  // ms — modo neutro (centrado, só piscando)
+#define EXPR_HOLD_DURATION      5000  // ms — expressão aleatória entre os neutros
+#define CURIOUS_INTERVAL       50000  // ms — a cada quanto tempo entra no modo curioso
+#define CURIOUS_DURATION       20000  // ms — duração do modo curioso (olhando em volta)
 #define DAY_EXPR_BEEP_FREQ        500  // Hz — aviso sonoro baixo ao trocar de expressão
 #define DAY_EXPR_BEEP_DUR          40  // ms
 

@@ -19,6 +19,7 @@
 // ══════════════════════════════════════════════════════════════════════
 enum EyeType {
   EYE_NEUTRO = 0,
+  EYE_CURIOSO,   // olhos se movendo/olhando em volta (era o antigo "neutro")
   EYE_FELIZ,
   EYE_TRISTE,
   EYE_MALVADO,
@@ -35,7 +36,7 @@ enum EyeType {
 };
 
 const char* eyeNames[] = {
-  "neutro", "feliz", "triste", "malvado",
+  "neutro", "curioso", "feliz", "triste", "malvado",
   "dormido", "cansado", "furia", "blink", "rascal",
   "surpreso", "apaixonado", "piscadinha", "confuso"
 };
@@ -103,6 +104,22 @@ unsigned long stateDuration = 0;
 unsigned long blinkTimer    = 0;
 unsigned long nextBlinkIn   = 0;
 bool blinking = false;
+
+// Guarda o progresso do neutro/curioso ao entrar numa piscada, para retomar
+// exatamente de onde parou (sem reiniciar o cronômetro a cada piscada).
+unsigned long savedStateTimer    = 0;
+unsigned long savedStateDuration = 0;
+
+// Marca o início da contagem do ciclo neutro/expressão — a cada
+// CURIOUS_INTERVAL desde a última vez que saiu do modo curioso, entra
+// nele de novo por CURIOUS_DURATION.
+unsigned long curiousTimer = 0;
+
+// ── Timing dos modos automáticos — ajustável via /timing (painel web) ──
+unsigned long neutralHoldCfg     = NEUTRAL_HOLD_DURATION;
+unsigned long exprHoldCfg        = EXPR_HOLD_DURATION;
+unsigned long curiousIntervalCfg = CURIOUS_INTERVAL;
+unsigned long curiousDurationCfg = CURIOUS_DURATION;
 
 const EyeType RANDOM_POOL[] = {
   EYE_FELIZ, EYE_FURIA, EYE_MALVADO, EYE_BLINK, EYE_RASCAL,
@@ -200,6 +217,25 @@ void saveSleepConfig() {
   prefs.end();
 }
 
+// ── Timing dos modos automáticos (neutro/curioso/expressão) — NVS ──────
+void loadTimingConfig() {
+  prefs.begin("timing", true);
+  neutralHoldCfg     = prefs.getULong("neutral", NEUTRAL_HOLD_DURATION);
+  exprHoldCfg        = prefs.getULong("expr",    EXPR_HOLD_DURATION);
+  curiousIntervalCfg = prefs.getULong("curInt",  CURIOUS_INTERVAL);
+  curiousDurationCfg = prefs.getULong("curDur",  CURIOUS_DURATION);
+  prefs.end();
+}
+
+void saveTimingConfig() {
+  prefs.begin("timing", false);
+  prefs.putULong("neutral", neutralHoldCfg);
+  prefs.putULong("expr",    exprHoldCfg);
+  prefs.putULong("curInt",  curiousIntervalCfg);
+  prefs.putULong("curDur",  curiousDurationCfg);
+  prefs.end();
+}
+
 // ── Cache de hora / clima ─────────────────────────────────────────────
 bool          ntpSynced    = false;
 int           cachedHour   = 0;
@@ -224,11 +260,32 @@ float  forecastMin[3]   = {0, 0, 0};
 int    forecastWCode[3] = {0, 0, 0};
 bool   forecastReady    = false;
 
-// Barueri, SP
+// Barueri, SP — valores padrão de fábrica; ajustáveis via /location (painel web)
 #define LOC_LAT   "-23.5114"
 #define LOC_LON   "-46.8756"
 #define LOC_CITY  "Barueri"
 #define NTP_SERVER "pool.ntp.org"
+
+String locLat  = LOC_LAT;
+String locLon  = LOC_LON;
+String locCity = LOC_CITY;
+
+// ── Localização (clima) — persistida em NVS ────────────────────────────
+void loadLocationConfig() {
+  prefs.begin("location", true);
+  locLat  = prefs.getString("lat",  LOC_LAT);
+  locLon  = prefs.getString("lon",  LOC_LON);
+  locCity = prefs.getString("city", LOC_CITY);
+  prefs.end();
+}
+
+void saveLocationConfig() {
+  prefs.begin("location", false);
+  prefs.putString("lat",  locLat);
+  prefs.putString("lon",  locLon);
+  prefs.putString("city", locCity);
+  prefs.end();
+}
 
 // ══════════════════════════════════════════════════════════════════════
 //  Helpers de tempo (animação)
@@ -236,7 +293,6 @@ bool   forecastReady    = false;
 unsigned long neutralDuration()    { return random(NEUTRAL_DURATION_MIN, NEUTRAL_DURATION_MAX); }
 unsigned long expressionDuration() { return random(EXPR_DURATION_MIN,    EXPR_DURATION_MAX);    }
 unsigned long nextBlinkDelay()     { return random(BLINK_INTERVAL_MIN,   BLINK_INTERVAL_MAX);   }
-unsigned long dayExpressionDuration() { return random(DAY_EXPR_DURATION_MIN, DAY_EXPR_DURATION_MAX); }
 
 // ══════════════════════════════════════════════════════════════════════
 //  Buzzer
@@ -374,7 +430,7 @@ void drawWeather() {
 
   // ── Linha 1: cidade ───────────────────────────────────────────────
   u8g2.setFont(u8g2_font_6x12_tf);
-  const char* city = LOC_CITY;
+  const char* city = locCity.c_str();
   int16_t wc = u8g2.getStrWidth(city);
   u8g2.drawStr((OLED_WIDTH - wc) / 2, 11, city);
 
@@ -503,15 +559,18 @@ void showLoadingScreen(const char* line1, const char* line2 = "") {
 void enterState(EyeType eye) {
   currentEye  = eye;
   stateTimer  = millis();
-  if (eye == EYE_NEUTRO) {
-    stateDuration = dayMode ? DAY_MODE_INTERVAL : neutralDuration();
+  if (eye == EYE_NEUTRO || eye == EYE_CURIOSO) {
+    // Neutro: centrado, só piscando. Curioso: olhando em volta (ambos piscam).
+    stateDuration = (eye == EYE_NEUTRO)
+                      ? (dayMode ? neutralHoldCfg : neutralDuration())
+                      : curiousDurationCfg;
     blinkTimer    = millis();
     nextBlinkIn   = nextBlinkDelay();
     blinking      = false;
   } else if (eye == EYE_BLINK) {
     stateDuration = BLINK_DURATION;
   } else {
-    stateDuration = dayMode ? dayExpressionDuration() : expressionDuration();
+    stateDuration = dayMode ? exprHoldCfg : expressionDuration();
   }
 }
 
@@ -552,8 +611,8 @@ void updateServo() {
   if (specialMode != MODE_NONE) {
     // Telas especiais: centraliza o servo suavemente
     targetAngle = servoCenterCfg;
-  } else if (currentEye == EYE_NEUTRO) {
-    // Modo neutro: segue currentX dos olhos
+  } else if (currentEye == EYE_CURIOSO) {
+    // Modo curioso: segue currentX dos olhos (só ele se move; o neutro fica centrado)
     // currentX varia entre -EYE_RANGE_X e +EYE_RANGE_X
     // mapeia para servoCenterCfg ± servoRangeCfg
     float ratio = currentX / (float)EYE_RANGE_X;  // -1.0 a +1.0
@@ -589,19 +648,60 @@ void updateStateMachine() {
     return;
   }
   if (currentEye == EYE_NEUTRO) {
-    updateMovement();
+    // Modo neutro: olhos sempre centrados, só piscando.
+    currentX = 0; currentY = 0;
     if (now - stateTimer > stateDuration) {
       previousEye = EYE_NEUTRO;
-      enterState(randomExpression());
-      if (dayMode) beep(DAY_EXPR_BEEP_FREQ, DAY_EXPR_BEEP_DUR);  // aviso sonoro baixo (modo dia)
+      if (dayMode && now - curiousTimer > curiousIntervalCfg) {
+        enterState(EYE_CURIOSO);  // pausa curiosa a cada CURIOUS_INTERVAL
+      } else {
+        enterState(randomExpression());
+        if (dayMode) beep(DAY_EXPR_BEEP_FREQ, DAY_EXPR_BEEP_DUR);  // aviso sonoro baixo (modo dia)
+      }
       return;
     }
-    if (!blinking && now - blinkTimer > nextBlinkIn) { previousEye = EYE_NEUTRO; enterState(EYE_BLINK); }
+    if (!blinking && now - blinkTimer > nextBlinkIn) {
+      previousEye        = EYE_NEUTRO;
+      savedStateTimer    = stateTimer;
+      savedStateDuration = stateDuration;
+      enterState(EYE_BLINK);
+    }
+  } else if (currentEye == EYE_CURIOSO) {
+    // Modo curioso: olhos se movendo/olhando em volta (antigo comportamento do neutro).
+    updateMovement();
+    if (now - stateTimer > stateDuration) {
+      previousEye = EYE_CURIOSO;
+      enterState(EYE_NEUTRO);
+      curiousTimer = now;  // reinicia a contagem dos 50s a partir da volta ao ciclo aleatório
+      return;
+    }
+    if (!blinking && now - blinkTimer > nextBlinkIn) {
+      previousEye        = EYE_CURIOSO;
+      savedStateTimer    = stateTimer;
+      savedStateDuration = stateDuration;
+      enterState(EYE_BLINK);
+    }
   } else if (currentEye == EYE_BLINK) {
-    if (now - stateTimer > stateDuration) { enterState(EYE_NEUTRO); blinkTimer = millis(); nextBlinkIn = nextBlinkDelay(); }
+    if (now - stateTimer > stateDuration) {
+      // Retoma o neutro/curioso exatamente de onde parou — NÃO usa enterState()
+      // aqui, pois isso reiniciaria o cronômetro a cada piscada e o ciclo
+      // nunca completaria os 20s (piscadas acontecem a cada 5-9s).
+      currentEye    = previousEye == EYE_CURIOSO ? EYE_CURIOSO : EYE_NEUTRO;
+      stateTimer    = savedStateTimer;
+      stateDuration = savedStateDuration;
+      blinkTimer    = millis();
+      nextBlinkIn   = nextBlinkDelay();
+    }
   } else {
     currentX = 0; currentY = 0;
-    if (now - stateTimer > stateDuration) { previousEye = currentEye; enterState(EYE_NEUTRO); }
+    if (now - stateTimer > stateDuration) {
+      previousEye = currentEye;
+      if (dayMode && now - curiousTimer > curiousIntervalCfg) {
+        enterState(EYE_CURIOSO);
+      } else {
+        enterState(EYE_NEUTRO);
+      }
+    }
   }
 }
 
@@ -622,9 +722,10 @@ void checkSleepMode() {
 
   } else if (!shouldSleep && sleepMode) {
     // Acorda — entra no modo dia
-    sleepMode = false;
-    dayMode   = true;
-    forcedEye = EYE_NEUTRO;
+    sleepMode    = false;
+    dayMode      = true;
+    forcedEye    = EYE_NEUTRO;
+    curiousTimer = millis();  // reinicia a contagem dos 50s a partir do despertar
     Serial.printf("[Sleep] Acordando (%02d:xx) — modo dia ativo\n", h);
   }
 }
@@ -676,8 +777,8 @@ void doSyncWeather() {
   // "daily" traz max/min/código de tempo dos próximos dias (index 0 = hoje);
   // forecast_days=4 garante os 3 dias seguintes a hoje em índices 1..3.
   String url = "https://api.open-meteo.com/v1/forecast"
-               "?latitude=" LOC_LAT
-               "&longitude=" LOC_LON
+               "?latitude=" + locLat +
+               "&longitude=" + locLon +
                "&current_weather=true"
                "&daily=temperature_2m_max,temperature_2m_min,weathercode"
                "&forecast_days=4"
@@ -980,6 +1081,7 @@ void renderEyes(int tamX, int tamY, int esp) {
 
   switch (currentEye) {
     case EYE_NEUTRO:
+    case EYE_CURIOSO:  // mesmo desenho do neutro — a diferença é o olhar se mover
       for (int i = 0; i < esp; i++) { normalEye(lPosX, posY, tamX+i, tamY+i); normalEye(rPosX, posY, tamX+i, tamY+i); }
       break;
     case EYE_BLINK:
@@ -1255,6 +1357,9 @@ void handlePanel() {
       <button class="nav-item" id="nav-ajustes" onclick="showTab('ajustes')">
         <span class="nav-icon">&#9881;&#65039;</span><span>Ajustes</span>
       </button>
+      <button class="nav-item" id="nav-config" onclick="showTab('config')">
+        <span class="nav-icon">&#127760;</span><span>Configurações</span>
+      </button>
     </nav>
     <main class="content">
       <section id="tab-emocoes" class="tab active">
@@ -1325,12 +1430,51 @@ void handlePanel() {
         </div>
 
         <div class="card settings-card">
+          <h2>&#9203; Tempo dos modos automáticos</h2>
+          <p class="sub">Ciclo: neutro → expressão → neutro..., com pausas curiosas</p>
+          <label>Neutro (centrado, piscando): <span id="neutralVal">20</span>s</label>
+          <input type="range" id="timingNeutral" min="3" max="120" value="20" oninput="atualizarLabelsTiming()" onchange="aplicarTiming()">
+          <label>Expressão aleatória: <span id="exprVal">5</span>s</label>
+          <input type="range" id="timingExpr" min="1" max="60" value="5" oninput="atualizarLabelsTiming()" onchange="aplicarTiming()">
+          <label>Intervalo até o modo curioso: <span id="curIntVal">50</span>s</label>
+          <input type="range" id="timingCurInt" min="5" max="600" value="50" oninput="atualizarLabelsTiming()" onchange="aplicarTiming()">
+          <label>Duração do modo curioso: <span id="curDurVal">20</span>s</label>
+          <input type="range" id="timingCurDur" min="3" max="120" value="20" oninput="atualizarLabelsTiming()" onchange="aplicarTiming()">
+          <div class="btn-row">
+            <button class="btn-sm btn-save" onclick="salvarTiming()">Salvar</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-config" class="tab">
+        <div class="card settings-card">
+          <h2>&#128205; Localização (clima)</h2>
+          <p class="sub">Usada para buscar clima atual e previsão via Open-Meteo</p>
+          <label>Cidade (exibida na tela de clima)</label>
+          <input type="text" id="locCity" placeholder="Ex: Barueri">
+          <label>Latitude</label>
+          <input type="text" id="locLat" placeholder="Ex: -23.5114">
+          <label>Longitude</label>
+          <input type="text" id="locLon" placeholder="Ex: -46.8756">
+          <div class="btn-row">
+            <button class="btn-sm btn-save" onclick="salvarLocalizacao()">Salvar</button>
+          </div>
+        </div>
+
+        <div class="card settings-card">
+          <h2>&#128225; Wi-Fi</h2>
+          <p class="sub">Rede utilizada pelo DrawEye para o painel e sincronizações</p>
+          <div class="btn-row">
+            <button class="btn-sm" onclick="window.location.href='/'">Trocar Wi-Fi</button>
+            <button class="btn-sm btn-danger" onclick="esquecer()">Esquecer rede</button>
+          </div>
+        </div>
+
+        <div class="card settings-card">
           <h2>&#128295; Dispositivo</h2>
           <p class="sub" id="deviceInfo">&mdash;</p>
           <div class="btn-row">
-            <button class="btn-sm" onclick="window.location.href='/'">Trocar Wi-Fi</button>
             <button class="btn-sm btn-warn" onclick="reiniciar()">Reiniciar</button>
-            <button class="btn-sm btn-danger" onclick="esquecer()">Esquecer rede</button>
           </div>
         </div>
       </section>
@@ -1455,6 +1599,61 @@ async function salvarSono(){
   }catch(err){ document.getElementById('panelStatus').textContent='Erro: '+err; }
 }
 
+// ── Tempo dos modos automáticos ────────────────────────────────────
+function atualizarLabelsTiming(){
+  document.getElementById('neutralVal').textContent = document.getElementById('timingNeutral').value;
+  document.getElementById('exprVal').textContent    = document.getElementById('timingExpr').value;
+  document.getElementById('curIntVal').textContent  = document.getElementById('timingCurInt').value;
+  document.getElementById('curDurVal').textContent  = document.getElementById('timingCurDur').value;
+}
+async function carregarTiming(){
+  try{
+    const r = await fetch('/timing'); const j = await r.json();
+    document.getElementById('timingNeutral').value = j.neutral;
+    document.getElementById('timingExpr').value    = j.expr;
+    document.getElementById('timingCurInt').value  = j.curint;
+    document.getElementById('timingCurDur').value  = j.curdur;
+    atualizarLabelsTiming();
+  }catch(e){}
+}
+async function aplicarTiming(){
+  const n = document.getElementById('timingNeutral').value;
+  const e = document.getElementById('timingExpr').value;
+  const ci = document.getElementById('timingCurInt').value;
+  const cd = document.getElementById('timingCurDur').value;
+  try{ await fetch('/timing?neutral='+n+'&expr='+e+'&curint='+ci+'&curdur='+cd); }catch(err){}
+}
+async function salvarTiming(){
+  await aplicarTiming();
+  try{
+    const n = document.getElementById('timingNeutral').value;
+    const e = document.getElementById('timingExpr').value;
+    const ci = document.getElementById('timingCurInt').value;
+    const cd = document.getElementById('timingCurDur').value;
+    await fetch('/timing?neutral='+n+'&expr='+e+'&curint='+ci+'&curdur='+cd+'&save=1');
+    document.getElementById('panelStatus').textContent='Timing salvo.';
+  }catch(err){ document.getElementById('panelStatus').textContent='Erro: '+err; }
+}
+
+// ── Localização (clima) ────────────────────────────────────────────
+async function carregarLocalizacao(){
+  try{
+    const r = await fetch('/location'); const j = await r.json();
+    document.getElementById('locCity').value = j.city;
+    document.getElementById('locLat').value  = j.lat;
+    document.getElementById('locLon').value  = j.lon;
+  }catch(e){}
+}
+async function salvarLocalizacao(){
+  const city = document.getElementById('locCity').value.trim();
+  const lat  = document.getElementById('locLat').value.trim();
+  const lon  = document.getElementById('locLon').value.trim();
+  try{
+    await fetch('/location?city='+encodeURIComponent(city)+'&lat='+encodeURIComponent(lat)+'&lon='+encodeURIComponent(lon)+'&save=1');
+    document.getElementById('panelStatus').textContent='Localização salva: '+city;
+  }catch(e){ document.getElementById('panelStatus').textContent='Erro: '+e; }
+}
+
 // ── Status / dispositivo ──────────────────────────────────────────
 function fmtUptime(sec){
   const h=Math.floor(sec/3600), m=Math.floor((sec%3600)/60);
@@ -1484,6 +1683,8 @@ async function esquecer(){
 carregarServo();
 carregarOlhos();
 carregarSono();
+carregarTiming();
+carregarLocalizacao();
 atualizarStatus();
 setInterval(atualizarStatus, 5000);
 </script>
@@ -1601,6 +1802,54 @@ void handleSleepCfg() {
   server.send(200, "application/json", json);
 }
 
+// ── Localização usada para o clima (lat/lon/cidade) ───────────────────
+void handleLocation() {
+  if (!server.hasArg("lat") && !server.hasArg("lon") && !server.hasArg("city")) {
+    String json = "{\"lat\":\"" + locLat + "\",\"lon\":\"" + locLon + "\",\"city\":\"" + locCity + "\"}";
+    server.send(200, "application/json", json);
+    return;
+  }
+
+  if (server.hasArg("lat"))  locLat  = server.arg("lat");
+  if (server.hasArg("lon"))  locLon  = server.arg("lon");
+  if (server.hasArg("city")) locCity = server.arg("city");
+
+  // Localização mudou — invalida o cache para forçar nova busca na próxima vez
+  weatherReady  = false;
+  forecastReady = false;
+
+  if (server.hasArg("save")) saveLocationConfig();
+
+  String json = "{\"lat\":\"" + locLat + "\",\"lon\":\"" + locLon + "\",\"city\":\"" + locCity + "\"}";
+  server.send(200, "application/json", json);
+}
+
+// ── Timing dos modos automáticos (neutro/curioso/expressão), em segundos ─
+void handleTiming() {
+  if (!server.hasArg("neutral") && !server.hasArg("expr") &&
+      !server.hasArg("curint")  && !server.hasArg("curdur")) {
+    String json = "{\"neutral\":" + String(neutralHoldCfg / 1000) +
+                  ",\"expr\":"    + String(exprHoldCfg / 1000) +
+                  ",\"curint\":"  + String(curiousIntervalCfg / 1000) +
+                  ",\"curdur\":"  + String(curiousDurationCfg / 1000) + "}";
+    server.send(200, "application/json", json);
+    return;
+  }
+
+  if (server.hasArg("neutral")) neutralHoldCfg     = (unsigned long)constrain(server.arg("neutral").toInt(), 3, 120)  * 1000UL;
+  if (server.hasArg("expr"))    exprHoldCfg        = (unsigned long)constrain(server.arg("expr").toInt(),    1, 60)   * 1000UL;
+  if (server.hasArg("curint"))  curiousIntervalCfg = (unsigned long)constrain(server.arg("curint").toInt(),  5, 600)  * 1000UL;
+  if (server.hasArg("curdur"))  curiousDurationCfg = (unsigned long)constrain(server.arg("curdur").toInt(),  3, 120)  * 1000UL;
+
+  if (server.hasArg("save")) saveTimingConfig();
+
+  String json = "{\"neutral\":" + String(neutralHoldCfg / 1000) +
+                ",\"expr\":"    + String(exprHoldCfg / 1000) +
+                ",\"curint\":"  + String(curiousIntervalCfg / 1000) +
+                ",\"curdur\":"  + String(curiousDurationCfg / 1000) + "}";
+  server.send(200, "application/json", json);
+}
+
 void setupWebServer() {
   server.on("/",        handleRoot);
   server.on("/scan",    handleScan);
@@ -1617,6 +1866,8 @@ void setupWebServer() {
   server.on("/servo",   handleServo);
   server.on("/eyesize", handleEyeSize);
   server.on("/sleep",   handleSleepCfg);
+  server.on("/location", handleLocation);
+  server.on("/timing",   handleTiming);
   server.begin();
   Serial.println("[Web] Servidor iniciado");
 }
@@ -1709,10 +1960,12 @@ void setup() {
   u8g2.begin();
   randomSeed(analogRead(0));
 
-  // Servo / olhos / sono — configs persistidas em NVS
+  // Servo / olhos / sono / localização / timing — configs persistidas em NVS
   loadServoConfig();
   loadEyeConfig();
   loadSleepConfig();
+  loadLocationConfig();
+  loadTimingConfig();
   ESP32PWM::allocateTimer(0);
   headServo.setPeriodHertz(50);
   headServo.attach(SERVO_PIN, 500, 2400);
@@ -1721,6 +1974,7 @@ void setup() {
   delay(500);
   setupWiFi();
   enterState(EYE_NEUTRO);
+  curiousTimer = millis();
   beep(BUZZER_FREQ_HIGH, 150);
   Serial.println("[DrawEye] Pronto!");
 }

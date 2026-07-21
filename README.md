@@ -22,16 +22,19 @@ DrawEye/
 
 ## Funcionalidades
 
-- **Olhos animados**: piscadas automáticas, movimento aleatório do olhar e 12
-  expressões — `neutro`, `feliz`, `triste`, `malvado`, `dormido`, `cansado`,
-  `furia`, `rascal`, `surpreso`, `apaixonado`, `piscadinha`, `confuso` (+ `blink`,
-  usado só pela piscada automática).
-- **Cabeça motorizada**: um servo acompanha suavemente o olhar no modo neutro e se
-  centraliza durante expressões e telas especiais.
-- **Modo dia × modo sono**: fora do horário de sono, o "modo dia" fica ativo — a
-  cada 30s os olhos fazem uma expressão automática (3 a 5s) com um aviso sonoro
-  baixo, voltando ao neutro em seguida. No horário de sono, os olhos dormem
-  sozinhos e só acordam depois do horário configurado.
+- **Olhos animados**: ciclo automático entre **neutro** (centrado, só piscando),
+  **curioso** (olhando em volta) e 12 expressões de humor — `feliz`, `triste`,
+  `malvado`, `dormido`, `cansado`, `furia`, `rascal`, `surpreso`, `apaixonado`,
+  `piscadinha`, `confuso` (+ `blink`, usado só pela piscada automática). Veja o
+  ciclo completo em "Modo dia × modo sono" abaixo.
+- **Cabeça motorizada**: um servo acompanha suavemente o olhar no modo curioso e se
+  centraliza durante o neutro, expressões e telas especiais.
+- **Modo dia × modo sono**: fora do horário de sono, o "modo dia" fica ativo — os
+  olhos alternam entre **neutro** (20s, centrado, só piscando) e uma **expressão
+  aleatória** (5s, com aviso sonoro baixo ao trocar), voltando ao neutro em
+  seguida. A cada 50s nesse ciclo, uma pausa **curiosa** de 20s (olhando em
+  volta) antes de continuar. No horário de sono, os olhos dormem sozinhos e só
+  acordam depois do horário configurado.
 - **Relógio, clima atual e previsão de 3 dias**: sincroniza hora via NTP e clima
   via Open-Meteo (cidade fixa em `config.h`) numa única requisição, com cache
   local para não precisar de Wi-Fi o tempo todo. O clima atual mostra também a
@@ -60,10 +63,12 @@ sobrescreve e persiste os valores em NVS — sobrevivendo a reinícios.
 | `EYE_SIZE_X / Y`, `EYE_THICKNESS` | tamanho e espessura **padrão** dos olhos — ajustável depois pelo painel web (aba Ajustes) |
 | `EYE_MOVE_SPEED`, `EYE_MOVE_INTERVAL`, `EYE_RANGE_*` | suavidade e alcance do olhar |
 | `BLINK_INTERVAL_MIN/MAX`, `BLINK_DURATION` | frequência e duração das piscadas |
-| `NEUTRAL_DURATION_*`, `EXPR_DURATION_*` | quanto tempo fica neutro / em expressão (fora do modo dia) |
-| `DAY_MODE_INTERVAL` | intervalo entre expressões automáticas no modo dia (padrão 30s) |
-| `DAY_EXPR_DURATION_MIN/MAX` | duração da expressão automática no modo dia (padrão 3–5s) |
-| `DAY_EXPR_BEEP_FREQ/DUR` | tom e duração do aviso sonoro baixo ao trocar de expressão no modo dia |
+| `NEUTRAL_DURATION_*`, `EXPR_DURATION_*` | duração de neutro/expressão apenas no caso raro de forçar uma expressão manualmente durante o sono |
+| `NEUTRAL_HOLD_DURATION` | duração do modo **neutro** no ciclo normal (padrão 20s) |
+| `EXPR_HOLD_DURATION` | duração da **expressão aleatória** entre os neutros (padrão 5s) |
+| `CURIOUS_INTERVAL` | a cada quanto tempo do ciclo neutro/expressão entra no modo **curioso** (padrão 50s) |
+| `CURIOUS_DURATION` | duração do modo **curioso** — olhando em volta (padrão 20s) |
+| `DAY_EXPR_BEEP_FREQ/DUR` | tom e duração do aviso sonoro baixo ao trocar para uma expressão aleatória |
 | `SERVO_PIN` | pino do servo (não ajustável pelo painel) |
 | `SERVO_CENTER`, `SERVO_RANGE`, `SERVO_SMOOTH` | centro, amplitude e suavidade **padrão** de fábrica — ajustáveis depois pelo painel web, que sobrescreve e persiste em NVS |
 | `SLEEP_HOUR_START` / `SLEEP_HOUR_END` | horário **padrão** de entrar/sair do modo sono — ajustável depois pelo painel web |
@@ -127,9 +132,18 @@ Todas as telas especiais (hora, clima, previsão, status) somem sozinhas depois 
 ### Modo dia × modo sono
 
 Fora do horário de sono (`SLEEP_HOUR_START`/`SLEEP_HOUR_END`, ajustáveis também
-pelo painel web), o **modo dia** fica ativo: a cada `DAY_MODE_INTERVAL` (padrão
-30s) os olhos fazem uma expressão automática (`DAY_EXPR_DURATION_MIN/MAX`,
-padrão 3–5s) com um aviso sonoro baixo, e voltam ao neutro em seguida.
+pelo painel web), o **modo dia** fica ativo e os olhos seguem este ciclo:
+
+1. **Neutro** (`NEUTRAL_HOLD_DURATION`, padrão 20s) — olhos centrados, só piscando.
+2. **Expressão aleatória** (`EXPR_HOLD_DURATION`, padrão 5s) — com um aviso
+   sonoro baixo (`DAY_EXPR_BEEP_FREQ/DUR`) ao entrar nela.
+3. Volta ao passo 1.
+
+A cada `CURIOUS_INTERVAL` (padrão 50s) de tempo nesse ciclo, em vez de voltar
+ao neutro entra no modo **curioso** (`CURIOUS_DURATION`, padrão 20s) — os olhos
+se movem olhando em volta (o mesmo comportamento que antes era do "neutro"; a
+cabeça motorizada também acompanha esse olhar) — e então retoma o ciclo normal
+a partir do neutro.
 
 Quando o horário sincronizado cai no intervalo de sono, os olhos entram
 sozinhos no modo `dormido` e a cabeça fica centralizada. Nesse modo só o
@@ -193,9 +207,11 @@ sozinha a cada poucos segundos.
 | `/sleep?start=23&end=9` | Aplica na hora, sem salvar |
 | `/sleep?...&save=1` | Aplica e **salva** em NVS |
 
-Expressões aceitas em `/eye`: `neutro`, `feliz`, `triste`, `malvado`, `dormido`,
-`cansado`, `furia`, `rascal`, `surpreso`, `apaixonado`, `piscadinha`, `confuso`,
-`blink`, `random`.
+Expressões aceitas em `/eye`: `neutro`, `curioso`, `feliz`, `triste`, `malvado`,
+`dormido`, `cansado`, `furia`, `rascal`, `surpreso`, `apaixonado`, `piscadinha`,
+`confuso`, `blink`, `random`. A aba **Emoções** do painel não tem botão para
+`curioso`/`blink` (são modos automáticos, não expressões de humor), mas
+seguem selecionáveis por essa rota.
 
 > A conexão Wi-Fi fica ativa continuamente enquanto o painel web estiver
 > disponível — sincronizar hora/clima (pelo botão físico) não derruba o Wi-Fi
